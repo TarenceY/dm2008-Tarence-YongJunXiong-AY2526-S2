@@ -19,14 +19,60 @@ const sndDead   = new Audio('assets/dead_sound.mp3');
 const sndRevive = new Audio('assets/revive_sound.m4a');
 const sndShout  = new Audio('assets/shout_sound.mp3');
 const sndDance  = new Audio('assets/dance_music.mp3');
-
 const _allSounds = [sndLight, sndHeavy, sndDead, sndRevive, sndShout, sndDance];
+
+const bgMusic = new Audio('assets/final_proj_bg.mp3');
+bgMusic.loop   = true;
+bgMusic.volume = 0.4;
+
+// Pain sound — decoded via Web Audio API so we can find + clip the loudest part
+let _painBuffer    = null;
+let _painStartSec  = 0;    // start of loudest region (seconds)
+let _painClipSec   = 0.4;  // how many seconds to play
+let _painAudioCtx  = null;
+
+function _initPainAudio() {
+  _painAudioCtx = new (window.AudioContext || window.webkitAudioContext)();
+  fetch('assets/pain_sound.mp3')
+    .then(r => r.arrayBuffer())
+    .then(buf => _painAudioCtx.decodeAudioData(buf))
+    .then(decoded => {
+      _painBuffer = decoded;
+      const ch  = decoded.getChannelData(0);
+      const sr  = decoded.sampleRate;
+      const win = Math.floor(sr * 0.1); // 100 ms analysis window
+      let maxRMS = 0;
+      for (let i = 0; i + win < ch.length; i += Math.floor(win / 2)) {
+        let sq = 0;
+        for (let j = 0; j < win; j++) sq += ch[i + j] * ch[i + j];
+        const rms = Math.sqrt(sq / win);
+        if (rms > maxRMS) {
+          maxRMS = rms;
+          // start clip slightly before the peak window
+          _painStartSec = Math.max(0, (i - win) / sr);
+        }
+      }
+    })
+    .catch(() => {});
+}
+
+function playPainSound() {
+  if (!_painBuffer || !_painAudioCtx) return;
+  try {
+    if (_painAudioCtx.state === 'suspended') _painAudioCtx.resume();
+    const src = _painAudioCtx.createBufferSource();
+    src.buffer = _painBuffer;
+    src.connect(_painAudioCtx.destination);
+    src.start(0, _painStartSec, _painClipSec);
+  } catch (e) {}
+}
 let _audioUnlocked = false;
 
 function _unlockAudio() {
   if (_audioUnlocked) return;
   _audioUnlocked = true;
   _allSounds.forEach(s => { s.play().then(() => s.pause()).catch(() => {}); });
+  bgMusic.play().catch(() => {});
 }
 
 document.addEventListener('keydown', _unlockAudio, { once: false });
@@ -86,7 +132,7 @@ function setup() {
 
   blob  = new Blob(width / 2, height / 2);
   combo = new ComboTracker();
-
+  _initPainAudio();
 }
 
 function draw() {
@@ -244,6 +290,8 @@ function windowResized() {
   if (blob) {
     blob.x = width / 2;
     blob.y = height / 2;
+    blob.homeX = width / 2;
+    blob.homeY = height / 2;
   }
 }
 
@@ -252,6 +300,18 @@ function keyPressed() {
   if (key === 'r' || key === 'R') blob.triggerRevive();
   if (key === 'f' || key === 'F') blob.triggerFeed();
   if (key === 'p' || key === 'P') blob.skinIdx = (blob.skinIdx + 1) % NUM_SKINS;
+}
+
+function mousePressed() {
+  if (blob && blob.containsPoint(mouseX, mouseY)) blob.startDrag(mouseX, mouseY);
+}
+
+function mouseDragged() {
+  if (blob && blob.isDragging) blob.drag(mouseX, mouseY);
+}
+
+function mouseReleased() {
+  if (blob && blob.isDragging) blob.release();
 }
 
 // ════════════════════════════════════════════════════════════════════════════
@@ -314,6 +374,17 @@ class Eye {
       rect(ex + P*0.8, ey + P*0.8, h, h);
       rect(ex,         ey + P*1.5, h, h);
       rect(ex + P*1.5, ey + P*1.5, h, h);
+      return;
+    }
+
+    if (blobState === 'hurt') {
+      fill(C.dark);
+      rect(ex,           ey + P * 1.1, P * 2,   P * 0.5); // tight shut line
+      rect(ex + P * 0.2, ey + P * 0.6, P * 0.6, P * 0.25); // crinkle left
+      rect(ex + P * 1.2, ey + P * 0.6, P * 0.6, P * 0.25); // crinkle right
+      // tear drop
+      fill(100, 160, 255, 200);
+      rect(ex + P * 0.8, ey + P * 1.6, P * 0.4, P * 0.8);
       return;
     }
 
@@ -527,6 +598,18 @@ class Blob {
     this.deadDir       = 1;
     this.deadY         = 0; // vertical slide toward bottom on death
     this.deadYTarget   = 0;
+
+    // throw / bounce
+    this.homeX         = x;
+    this.homeY         = y;
+    this.throwVX       = 0;
+    this.throwVY       = 0;
+    this.isDragging    = false;
+    this.isThrown      = false;
+    this.lastThrowTime = 0;
+    this.mouseHistory  = [];
+    this.dragOffX      = 0;
+    this.dragOffY      = 0;
   }
 
   handleInput(pressType) {
@@ -664,6 +747,7 @@ class Blob {
 
     // auto state transitions
     if (this.state === 'annoyed'          && this.stateTimer > 90)  this._setState('unimpressed');
+    if (this.state === 'hurt'             && millis() - this.stateStartMs > 800) this._setState('unimpressed');
     if (this.state === 'overwhelmed'      && millis() - this.stateStartMs > 4000) this._setState('unimpressed');
     if (this.state === 'reluctant_dance'  && millis() - this.stateStartMs > 3000) this._setState('embarrassed');
     if (this.state === 'embarrassed'      && millis() - this.stateStartMs > 2000) this._setState('unimpressed');
@@ -705,6 +789,46 @@ class Blob {
     this.punchAngleVel *= 0.88;
     this.punchAngle    += this.punchAngleVel;
     this.punchAngle    *= 0.9;
+
+    // throw / bounce physics
+    if (this.isThrown && !this.isDragging) {
+      this.x += this.throwVX;
+      this.y += this.throwVY;
+      this.throwVX *= 0.985;
+      this.throwVY *= 0.985;
+
+      const hw = 6 * P, hh = 10 * P;
+      let hitH = false, hitV = false;
+      if (this.x < hw)          { this.x = hw;          this.throwVX =  abs(this.throwVX) * 0.8; hitH = true; }
+      if (this.x > width - hw)  { this.x = width - hw;  this.throwVX = -abs(this.throwVX) * 0.8; hitH = true; }
+      if (this.y < hh)          { this.y = hh;           this.throwVY =  abs(this.throwVY) * 0.8; hitV = true; }
+      if (this.y > height - hh) { this.y = height - hh; this.throwVY = -abs(this.throwVY) * 0.8; hitV = true; }
+
+      if (hitH || hitV) {
+        this.lastThrowTime = millis();
+        playPainSound();
+        // directional squash on impact
+        if      (hitH && !hitV) { this.squashX = 0.45; this.squashY = 1.5;  }
+        else if (hitV && !hitH) { this.squashX = 1.5;  this.squashY = 0.45; }
+        else                    { this.squashX = 0.6;  this.squashY = 0.6;  }
+        // impact sparks burst
+        for (let i = 0; i < 14; i++) {
+          particles.push(new Particle(this.x, this.y, 'spark'));
+        }
+        if (!['dead', 'reviving', 'overwhelmed'].includes(this.state)) this._setState('hurt');
+      }
+
+      // return home after 5 seconds of no throwing or bouncing
+      if (millis() - this.lastThrowTime > 5000) {
+        this.x = lerp(this.x, this.homeX, 0.05);
+        this.y = lerp(this.y, this.homeY, 0.05);
+        if (dist(this.x, this.y, this.homeX, this.homeY) < 1) {
+          this.x = this.homeX; this.y = this.homeY;
+          this.throwVX = 0;    this.throwVY = 0;
+          this.isThrown = false;
+        }
+      }
+    }
 
     // dead: fall sideways and slide to bottom of screen
     if (this.state === 'dead') {
@@ -788,6 +912,41 @@ class Blob {
     this._drawBody();
     this._drawHead();
     pop();
+  }
+
+  containsPoint(mx, my) {
+    return mx > this.x - 6 * P && mx < this.x + 6 * P &&
+           my > this.y - 10 * P && my < this.y + 10 * P;
+  }
+
+  startDrag(mx, my) {
+    this.isDragging   = true;
+    this.isThrown     = false;
+    this.throwVX      = 0;
+    this.throwVY      = 0;
+    this.mouseHistory = [];
+    this.dragOffX     = this.x - mx;
+    this.dragOffY     = this.y - my;
+  }
+
+  drag(mx, my) {
+    this.x = mx + this.dragOffX;
+    this.y = my + this.dragOffY;
+    this.mouseHistory.push({ x: this.x, y: this.y, t: millis() });
+    if (this.mouseHistory.length > 6) this.mouseHistory.shift();
+  }
+
+  release() {
+    this.isDragging    = false;
+    this.isThrown      = true;
+    this.lastThrowTime = millis();
+    if (this.mouseHistory.length >= 2) {
+      let a  = this.mouseHistory[0];
+      let b  = this.mouseHistory[this.mouseHistory.length - 1];
+      let dt = max(16, b.t - a.t) / 1000;
+      this.throwVX = constrain((b.x - a.x) / dt, -30, 30);
+      this.throwVY = constrain((b.y - a.y) / dt, -30, 30);
+    }
   }
 
   _drawBody() {
@@ -937,6 +1096,15 @@ class Blob {
       rect(9 * P,  2.5 * P, P, P * 0.5);
       rect(10 * P, 2 * P,   P, P * 0.5);
 
+    } else if (this.state === 'hurt') {
+      // inner corners raised — pain / worry expression
+      rect(P,      3.5 * P, P, P * 0.5);   // left outer (low)
+      rect(2 * P,  2.8 * P, P, P * 0.5);
+      rect(3 * P,  2.2 * P, P, P * 0.5);   // left inner (high)
+      rect(8 * P,  2.2 * P, P, P * 0.5);   // right inner (high)
+      rect(9 * P,  2.8 * P, P, P * 0.5);
+      rect(10 * P, 3.5 * P, P, P * 0.5);   // right outer (low)
+
     } else if (this.state === 'asleep' || this.state === 'dead' || this.state === 'reviving') {
       // lowered, relaxed/drooped brows
       rect(P,     3.5 * P, 3 * P, P * 0.5);
@@ -970,6 +1138,15 @@ class Blob {
         // perfectly flat line. don't talk to it.
         rect(3 * P, 9 * P, 6 * P, P * 0.5);
       }
+
+    } else if (this.state === 'hurt') {
+      // wide grimace — stretched mouth, clenched teeth showing
+      rect(2 * P,   8.6 * P, 8 * P,   P * 0.45); // upper lip
+      rect(2 * P,   9.8 * P, 8 * P,   P * 0.45); // lower lip
+      rect(2 * P,   8.6 * P, P * 0.4, P * 1.6);  // left corner pull
+      rect(9.6 * P, 8.6 * P, P * 0.4, P * 1.6);  // right corner pull
+      fill(C.wht);
+      rect(2.5 * P, 9.05 * P, 7 * P,  P * 0.65); // clenched teeth
 
     } else if (this.state === 'annoyed') {
       // slight frown — centre drops
