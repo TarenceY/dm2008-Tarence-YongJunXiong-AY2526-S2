@@ -6,5 +6,5 @@ The biggest challenge was making the bird feel like an actual character rather t
 
 Sound effects were another thing I underestimated. Adding a flap sound and a game over sound shifted the feel of the game significantly — even though nothing about the core mechanics changed. It made actions feel like they had weight. The high score system using localStorage was also new to me in a games context, and it added a sense of progression that kept me actually testing the game rather than just running it once and moving on.
 
-Looking back, I think the biggest thing I took away is that polish matters more than I expected. The template gave us a game, but the decisions we made on top of it — the sprite, the rotation, the sounds — are what made it feel like our game.
+Looking back, I think the biggest thing I took away is that polish matters more than I expected. While The template provided me a simple framework, the decisions we made on top of it such as the sprite, the rotation, the sounds, are what made it feel like my own game.
 
